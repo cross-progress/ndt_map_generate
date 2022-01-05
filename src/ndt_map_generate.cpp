@@ -11,8 +11,10 @@
 #include <math.h>
 #include <Eigen/Dense>
 #include <Eigen/Core>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
-ros::Publisher pub;
+ros::Publisher vis_pub;
 
 typedef struct
 {
@@ -157,7 +159,7 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
         if(max_p[2]<remove_NaN_cloud->points[i].z) max_p[2] = remove_NaN_cloud->points[i].z;
     }
     // calculation min max div voxel
-    float leaf_size = 1;
+    float leaf_size = 2;
     float inverse_leaf_size = 1 / leaf_size;
     float min_b[3];
     float max_b[3];
@@ -191,16 +193,15 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
             iter->second.mean[0] /= iter->second.points;
             iter->second.mean[1] /= iter->second.points;
             iter->second.mean[2] /= iter->second.points;
-            std::cout << "valid" << std::endl;
+            // std::cout << "valid" << std::endl;
         } 
         else erase_list.push_back(iter->first);
     }
 
-    for(int erase_id=0;erase_id<erase_list.size();erase_id++){
+    for(int erase_id=0;erase_id<erase_list.size();erase_id++){//点削除
         auto erase_iter = leaves.find(erase_list[erase_id]);
         if( erase_iter != leaves.end()) leaves.erase(erase_iter);
     }
-
 
     for(size_t i=0;i<remove_NaN_cloud->points.size();i++){//共分散合算
         int axis_v_index[3];
@@ -208,16 +209,28 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
         axis_v_index[1] = static_cast<int>(std::floor(remove_NaN_cloud->points[i].y * inverse_leaf_size) - static_cast<float>(min_b[1]));
         axis_v_index[2] = static_cast<int>(std::floor(remove_NaN_cloud->points[i].z * inverse_leaf_size) - static_cast<float>(min_b[2]));
         int map_id = axis_v_index[0] * div_mul[0] + axis_v_index[1] * div_mul[1] + axis_v_index[2] * div_mul[2];
-
-        leaves[map_id].params[0] += pow(remove_NaN_cloud->points[i].x-leaves[map_id].mean[0],2);
-        leaves[map_id].params[1] += pow(remove_NaN_cloud->points[i].y-leaves[map_id].mean[1],2);
-        leaves[map_id].params[2] += pow(remove_NaN_cloud->points[i].z-leaves[map_id].mean[2],2);
-        leaves[map_id].params[3] += (remove_NaN_cloud->points[i].x-leaves[map_id].mean[0]) * (remove_NaN_cloud->points[i].y-leaves[map_id].mean[1]);
-        leaves[map_id].params[3] += (remove_NaN_cloud->points[i].x-leaves[map_id].mean[0]) * (remove_NaN_cloud->points[i].z-leaves[map_id].mean[2]);
-        leaves[map_id].params[3] += (remove_NaN_cloud->points[i].y-leaves[map_id].mean[1]) * (remove_NaN_cloud->points[i].z-leaves[map_id].mean[2]);
+        auto process_iter = leaves.find(map_id);
+        if (process_iter != leaves.end()){
+            leaves[map_id].params[0] += pow(remove_NaN_cloud->points[i].x-leaves[map_id].mean[0],2);
+            leaves[map_id].params[1] += pow(remove_NaN_cloud->points[i].y-leaves[map_id].mean[1],2);
+            leaves[map_id].params[2] += pow(remove_NaN_cloud->points[i].z-leaves[map_id].mean[2],2);
+            leaves[map_id].params[3] += (remove_NaN_cloud->points[i].x-leaves[map_id].mean[0]) * (remove_NaN_cloud->points[i].y-leaves[map_id].mean[1]);
+            leaves[map_id].params[4] += (remove_NaN_cloud->points[i].x-leaves[map_id].mean[0]) * (remove_NaN_cloud->points[i].z-leaves[map_id].mean[2]);
+            leaves[map_id].params[5] += (remove_NaN_cloud->points[i].y-leaves[map_id].mean[1]) * (remove_NaN_cloud->points[i].z-leaves[map_id].mean[2]);
+        }
     }
-
+    int max_points=0;
+    for(auto iter = leaves.begin(); iter != leaves.end(); ++iter){
+        if(max_points < iter->second.points){
+            max_points = iter->second.points;
+        }
+    }
+    std::cout << "max_points = " << max_points << std::endl;
+    int marker_count = 0;
+    visualization_msgs::MarkerArray marker_list;
     for(auto iter = leaves.begin(); iter != leaves.end(); ++iter){//3点以上なら平均計算それ以下なら削除
+        if (iter == leaves.end()) continue;
+
         for(int param_id=0;param_id<6;param_id++){
             iter->second.params[param_id] /= iter->second.points;
         }
@@ -231,8 +244,64 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
         iter->second.a[7] = iter->second.params[5];
         iter->second.a[8] = iter->second.params[2];
         eigenJacobiMethod(iter->second.a, iter->second.eigen_vector, 3);
+
+        if(isnan(std::sqrt(iter->second.a[0])*2)) continue;
+        if(isnan(std::sqrt(iter->second.a[4])*2)) continue;
+        if(isnan(std::sqrt(iter->second.a[8])*2)) continue;
+
+
+        //vis
+        Eigen::Matrix3f mat_rot;
+
+        mat_rot(0,0) = iter->second.eigen_vector[0];
+        mat_rot(0,1) = iter->second.eigen_vector[1];
+        mat_rot(0,2) = iter->second.eigen_vector[2];
+        mat_rot(1,0) = iter->second.eigen_vector[3];
+        mat_rot(1,1) = iter->second.eigen_vector[4];
+        mat_rot(1,2) = iter->second.eigen_vector[5];
+        mat_rot(2,0) = iter->second.eigen_vector[6];
+        mat_rot(2,1) = iter->second.eigen_vector[7];
+        mat_rot(2,2) = iter->second.eigen_vector[8];
+
+        Eigen::Quaternionf q_rot(mat_rot);
+
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "map";
+        marker.header.stamp = ros::Time();
+        marker.ns = "my_namespace";
+        marker.id = iter->first;
+        marker.type = visualization_msgs::Marker::SPHERE;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.pose.position.x = iter->second.mean[0];
+        marker.pose.position.y = iter->second.mean[1];
+        marker.pose.position.z = iter->second.mean[2];
+        marker.pose.orientation.x = q_rot.x();
+        marker.pose.orientation.y = q_rot.y();
+        marker.pose.orientation.z = q_rot.z();
+        marker.pose.orientation.w = q_rot.w();
+        marker.scale.x = std::sqrt(iter->second.a[0])*2;
+        marker.scale.y = std::sqrt(iter->second.a[4])*2;
+        marker.scale.z = std::sqrt(iter->second.a[8])*2;
+        marker.color.a = 0.7;//iter->second.points/max_points;
+        marker.color.r = 0.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+        // marker_list.markers.push_back(marker);
+        if(marker_count<10000) {
+            marker_list.markers.push_back(marker);
+            marker_count++;
+            std::cout << "mean = " << iter->second.mean[0] << "," << iter->second.mean[1] << "," << iter->second.mean[2] << std::endl;
+            std::cout << "eigen_vector = ";
+            for(int vis_id=0;vis_id<9;vis_id++){
+                std::cout << iter->second.eigen_vector[vis_id] << " , ";
+            }
+            std::cout << std::endl;
+            std::cout << "eigen_value = " << iter->second.a[0] << "," << iter->second.a[1] << "," << iter->second.a[2] << std::endl;
+        }
     }
-    std::cout << "loop" << std::endl;
+    // std::cout << "loop" << std::endl;
+    
+    vis_pub.publish(marker_list);
 }
 
 int
@@ -246,7 +315,7 @@ main (int argc, char** argv)
     ros::Subscriber sub = nh.subscribe ("map_cloud", 1, CloudCallback);
 
     // Create a ROS publisher for the output point cloud
-    pub = nh.advertise<sensor_msgs::PointCloud2> ("normal_cloud", 1);//NDT Marker array 出す
+    vis_pub = nh.advertise<visualization_msgs::MarkerArray>("/ndt_ellipsoid", 10);
 
     // Spin
     ros::spin ();
