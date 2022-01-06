@@ -2,6 +2,7 @@
 #include <ros/ros.h>
 // PCL specific includes
 #include <sensor_msgs/PointCloud2.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -16,6 +17,22 @@
 
 ros::Publisher vis_pub;
 
+int sort_axis=0;
+
+typedef struct
+{
+	int	id;
+	float pos[3];
+} point_with_id;
+
+typedef struct
+{
+	int	parent_id;
+	int left_id;
+	int right_id;
+	int axis;
+} node;
+
 typedef struct
 {
 	int	points = 0;
@@ -28,6 +45,26 @@ typedef struct
     // Eigen::Matrix3f evecs;
     // Eigen::Vector3f evals;
 } Leaf;
+
+std::vector<int> neighbor_list;
+std::map<int, node> nodes;
+
+int AxisSort(const void * n1, const void * n2)
+{
+	if (((point_with_id *)n1)->pos[sort_axis] > ((point_with_id *)n2)->pos[sort_axis])
+	{
+		return 1;
+	}
+	else if (((point_with_id *)n1)->pos[sort_axis] < ((point_with_id *)n2)->pos[sort_axis])
+	{
+		return -1;
+	}
+	else
+	{
+		return 0;
+	}
+}
+
 
 int eigenJacobiMethod(float *a, float *v, int n, float eps = 1e-8, int iter_max = 100)
 {
@@ -129,6 +166,95 @@ int eigenJacobiMethod(float *a, float *v, int n, float eps = 1e-8, int iter_max 
  
     return cnt;
 } 
+
+int CreateNode(int* root_id,int point_size,std::map<int, node>& nodes, std::vector<std::vector<int>> axis_sort_ids,int depth,int parent_id,bool node_is_right)
+{
+	int group_size = axis_sort_ids[0].size();
+	int axis = depth % 3;
+	size_t middle = ((group_size-1)/2);
+	int median_id = axis_sort_ids[axis][middle];
+	nodes[median_id].axis = axis;
+	nodes[median_id].parent_id = parent_id;
+	nodes[median_id].left_id = -1;
+	nodes[median_id].right_id = -1;
+	if(parent_id >= 0){ // 親あり
+		if(!node_is_right) nodes[parent_id].left_id = median_id;
+		if(node_is_right) nodes[parent_id].right_id = median_id;
+	}
+	else{ // 親なし
+		*root_id = median_id;
+	}
+
+	if(group_size > 1){ // 子あり
+		std::vector<int>::iterator middle_iter(axis_sort_ids[axis].begin());
+		std::advance(middle_iter,middle);
+		std::vector<int> left_group(axis_sort_ids[axis].begin(),middle_iter);
+		++middle_iter;
+		std::vector<int> right_group(middle_iter,axis_sort_ids[axis].end());
+		std::cout<<std::endl;
+        std::cout<<"median_id"<<median_id<<std::endl;
+		std::cout<<"middle"<<middle<<std::endl;
+		std::cout<<"axis"<<nodes[median_id].axis<<std::endl;
+		std::cout<<"group is (";
+		for(int i=0;i<group_size;i++){
+			std::cout<<axis_sort_ids[axis][i]<<",";
+		}
+		std::cout<<")"<<std::endl;
+		std::cout<<"left_group is (";
+		for(int i=0;i<left_group.size();i++){
+			std::cout<<left_group[i]<<",";
+		}
+		std::cout<<")"<<std::endl;
+		std::cout<<"right_group is (";
+		for(int i=0;i<right_group.size();i++){
+			std::cout<<right_group[i]<<",";
+		}
+		std::cout<<")"<<std::endl;
+        std::cout<<std::endl;
+		std::vector<std::vector<int>> left_axis_sort_ids(3,std::vector<int>(left_group.size()));
+		std::vector<std::vector<int>> right_axis_sort_ids(3,std::vector<int>(right_group.size()));
+
+		std::vector<int> next_group(point_size,0);
+		std::vector<int> left_axis_count(3,0);
+		std::vector<int> right_axis_count(3,0);
+		for(int i = 0; i < left_group.size(); i++){
+			left_axis_sort_ids[axis][i] = left_group[i];
+			next_group[left_group[i]] = -1;
+		}
+		for(int i = 0; i < right_group.size(); i++){
+			right_axis_sort_ids[axis][i] = right_group[i];
+			next_group[right_group[i]] = 1;
+		}
+		for(int i = 0; i < group_size; i++){
+			for(int j = 0; j < 3; j++){
+				if(j==axis) continue;
+				if(next_group[axis_sort_ids[j][i]] == -1){
+					left_axis_sort_ids[j][left_axis_count[j]] = axis_sort_ids[j][i];
+					left_axis_count[j]++;
+				}
+				else if(next_group[axis_sort_ids[j][i]] == 1){
+					right_axis_sort_ids[j][right_axis_count[j]] = axis_sort_ids[j][i];
+					right_axis_count[j]++;
+				}
+			}
+		}
+
+		bool left = false;
+		bool right = false;
+		if(left_group.size() > 0) left = CreateNode(root_id,point_size,nodes,left_axis_sort_ids,depth+1,median_id,false);
+		else left = true;
+
+		if(right_group.size() > 0) right = CreateNode(root_id,point_size,nodes,right_axis_sort_ids,depth+1,median_id,true);
+		else right = true;
+
+		if(right&&left) return 1;
+	}
+	else {
+        std::cout<<"leaf"<<std::endl;
+        return 1;
+    }
+}
+
 
 void
 CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
@@ -286,8 +412,18 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
         marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
+        bool neighbor_voxel = false;
+        if(neighbor_list.size()>0){
+            for(int neighbor_count=0;neighbor_count<neighbor_list.size();neighbor_count++){
+                if(iter->first==neighbor_list[neighbor_count]) neighbor_voxel = true;
+            }
+            if(neighbor_voxel){
+                marker.color.g = 0.0;
+                marker.color.r = 1.0;
+            }
+        }
         // marker_list.markers.push_back(marker);
-        if(marker_count<10000) {
+        if(marker_count<10000) {//多すぎるとバグる
             marker_list.markers.push_back(marker);
             marker_count++;
             std::cout << "mean = " << iter->second.mean[0] << "," << iter->second.mean[1] << "," << iter->second.mean[2] << std::endl;
@@ -302,6 +438,57 @@ CloudCallback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
     // std::cout << "loop" << std::endl;
     
     vis_pub.publish(marker_list);
+    std::cout << std::endl;
+    
+    std::cout << std::endl;
+    std::map<size_t, Leaf> sample_leaves;
+	points_array = {{6, 0, 0}, 
+					{5, 3, 0},
+					{3, 4, 0},
+					{4, 6, 0},
+					{2, 5, 0},
+					{1, 2, 0},
+					{0, 1, 0}};
+    sample_leaves[0].mean[0]=6;
+    sample_leaves[0].mean[1]=6;
+    sample_leaves[0].mean[2]=6;
+    //木を作る
+	int root_id=-1;
+	std::vector<std::vector<int>> axis_sort_ids(3,std::vector<int>(leaves.size()));
+	point_with_id point_with_ids[leaves.size()];
+    int point_count = 0;
+	for(auto iter = leaves.begin(); iter != leaves.end(); ++iter){//voxel
+		point_with_ids[point_count].id = static_cast<int>(iter->first);
+		point_with_ids[point_count].pos[0] = iter->second.mean[0];//mean
+		point_with_ids[point_count].pos[1] = iter->second.mean[1];
+		point_with_ids[point_count].pos[2] = iter->second.mean[2];
+        point_count++;
+	}
+	for(sort_axis=0; sort_axis<3; sort_axis++){
+		qsort(point_with_ids, leaves.size(), sizeof(point_with_id), AxisSort);
+		for (int i=0 ; i < leaves.size() ; i++){
+			axis_sort_ids[sort_axis][i]=point_with_ids[i].id;
+		}
+	}
+    std::cout << "sort end" << std::endl;
+    std::cout << "size = " << leaves.size() << std::endl;
+    std::cout << "build tree" << std::endl;
+	int create_end = CreateNode(&root_id,leaves.size(),nodes,axis_sort_ids,0,-1,false);
+    std::cout << "build tree end" << std::endl;
+}
+
+void
+PoseCallback (const geometry_msgs::PoseStampedConstPtr & pose_msg)
+{
+    std::cout << "Pose callback" << std::endl;
+    //座標取得
+    float target[3];
+    target[0] = pose_msg->pose.position.x;
+    target[1] = pose_msg->pose.position.y;
+    target[2] = pose_msg->pose.position.z;
+
+    //近傍探索
+
 }
 
 int
@@ -312,7 +499,8 @@ main (int argc, char** argv)
     ros::NodeHandle nh;
 
     // Create a ROS subscriber for the input point cloud
-    ros::Subscriber sub = nh.subscribe ("map_cloud", 1, CloudCallback);
+    ros::Subscriber map_sub = nh.subscribe ("map_cloud", 1, CloudCallback);
+    ros::Subscriber pose_sub = nh.subscribe ("move_base_simple/goal", 1, PoseCallback);
 
     // Create a ROS publisher for the output point cloud
     vis_pub = nh.advertise<visualization_msgs::MarkerArray>("/ndt_ellipsoid", 10);
