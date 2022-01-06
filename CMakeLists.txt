@@ -139,7 +139,7 @@ include_directories(
 ## The recommended prefix ensures that target names across packages don't collide
 # add_executable(${PROJECT_NAME}_node src/nomal_estimator_node.cpp)
 add_executable(ndt_map_generate src/ndt_map_generate.cpp)
-
+add_executable(map_loader src/map_loader.cpp)
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
 ## target back to the shorter version for ease of user use
@@ -156,6 +156,9 @@ add_executable(ndt_map_generate src/ndt_map_generate.cpp)
 # )
 
 target_link_libraries(ndt_map_generate
+  ${catkin_LIBRARIES}
+)
+target_link_libraries(map_loader
   ${catkin_LIBRARIES}
 )
 
